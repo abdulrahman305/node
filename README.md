@@ -43,7 +43,7 @@ Looking for help? Check out the
 
 * **Current**: Under active development. Code for the Current release is in the
   branch for its major version number (for example,
-  [v19.x](https://github.com/nodejs/node/tree/v19.x)). Node.js releases a new
+  [v22.x](https://github.com/nodejs/node/tree/v22.x)). Node.js releases a new
   major version every 6 months, allowing for breaking changes. This happens in
   April and October every year. Releases appearing each October have a support
   life of 8 months. Releases appearing each April convert to LTS (see below)
@@ -287,7 +287,7 @@ For information about the governance of the Node.js project, see
 * [aduh95](https://github.com/aduh95) -
   **Antoine du Hamel** <<duhamelantoine1995@gmail.com>> (he/him)
 * [anonrig](https://github.com/anonrig) -
-  **Yagiz Nizipli** <<yagiz@nizipli.com>> (he/him)
+  **Yagiz Nizipli** <<yagiz@nizipli.com>> (he/him) - [Support me](https://github.com/sponsors/anonrig)
 * [apapirovski](https://github.com/apapirovski) -
   **Anatoli Papirovski** <<apapirovski@mac.com>> (he/him)
 * [atlowChemi](https://github.com/atlowChemi) -

@@ -175,10 +175,6 @@ class NODE_EXTERN_PRIVATE IsolateData : public MemoryRetainer {
   uint16_t* embedder_id_for_cppgc() const;
   uint16_t* embedder_id_for_non_cppgc() const;
 
-  static inline void SetCppgcReference(v8::Isolate* isolate,
-                                       v8::Local<v8::Object> object,
-                                       void* wrappable);
-
   inline uv_loop_t* event_loop() const;
   inline MultiIsolatePlatform* platform() const;
   inline const SnapshotData* snapshot_data() const;
@@ -549,8 +545,6 @@ struct SnapshotMetadata {
   std::string node_version;
   std::string node_arch;
   std::string node_platform;
-  // Result of v8::ScriptCompiler::CachedDataVersionTag().
-  uint32_t v8_cache_version_tag;
   SnapshotFlags flags;
 };
 
@@ -1028,6 +1022,9 @@ class Environment final : public MemoryRetainer {
   inline CompileCacheHandler* compile_cache_handler();
   inline bool use_compile_cache() const;
   void InitializeCompileCache();
+  // Enable built-in compile cache if it has not yet been enabled.
+  // The cache will be persisted to disk on exit.
+  CompileCacheEnableResult EnableCompileCache(const std::string& cache_dir);
 
   void RunAndClearNativeImmediates(bool only_refed = false);
   void RunAndClearInterrupts();

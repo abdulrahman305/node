@@ -355,8 +355,7 @@ MaybeLocal<Uint8Array> ByteSource::ToBuffer(Environment* env) {
 
 ByteSource ByteSource::FromBIO(const BIOPointer& bio) {
   CHECK(bio);
-  BUF_MEM* bptr;
-  BIO_get_mem_ptr(bio.get(), &bptr);
+  BUF_MEM* bptr = bio;
   ByteSource::Builder out(bptr->length);
   memcpy(out.data<void>(), bptr->data, bptr->length);
   return std::move(out).release();
@@ -420,7 +419,8 @@ ByteSource ByteSource::NullTerminatedCopy(Environment* env,
 
 ByteSource ByteSource::FromSymmetricKeyObjectHandle(Local<Value> handle) {
   CHECK(handle->IsObject());
-  KeyObjectHandle* key = Unwrap<KeyObjectHandle>(handle.As<Object>());
+  KeyObjectHandle* key =
+      BaseObject::Unwrap<KeyObjectHandle>(handle.As<Object>());
   CHECK_NOT_NULL(key);
   return Foreign(key->Data()->GetSymmetricKey(),
                  key->Data()->GetSymmetricKeySize());
@@ -605,12 +605,11 @@ MaybeLocal<Value> EncodeBignum(
                              error);
 }
 
-Maybe<bool> SetEncodedValue(
-    Environment* env,
-    Local<Object> target,
-    Local<String> name,
-    const BIGNUM* bn,
-    int size) {
+Maybe<void> SetEncodedValue(Environment* env,
+                            Local<Object> target,
+                            Local<String> name,
+                            const BIGNUM* bn,
+                            int size) {
   Local<Value> value;
   Local<Value> error;
   CHECK_NOT_NULL(bn);
@@ -618,9 +617,10 @@ Maybe<bool> SetEncodedValue(
   if (!EncodeBignum(env, bn, size, &error).ToLocal(&value)) {
     if (!error.IsEmpty())
       env->isolate()->ThrowException(error);
-    return Nothing<bool>();
+    return Nothing<void>();
   }
-  return target->Set(env->context(), name, value);
+  return target->Set(env->context(), name, value).IsJust() ? JustVoid()
+                                                           : Nothing<void>();
 }
 
 bool SetRsaOaepLabel(const EVPKeyCtxPointer& ctx, const ByteSource& label) {

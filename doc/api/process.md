@@ -1101,7 +1101,6 @@ An example of the possible output looks like:
      node_shared_zlib: 'false',
      node_use_openssl: 'true',
      node_shared_openssl: 'false',
-     strict_aliasing: 'true',
      target_arch: 'x64',
      v8_use_snapshot: 1
    }
@@ -2711,7 +2710,7 @@ console.log(memoryUsage.rss());
 <!-- YAML
 added: v0.1.26
 changes:
-  - version: REPLACEME
+  - version: v22.7.0
     pr-url: https://github.com/nodejs/node/pull/51280
     description: Changed stability to Legacy.
   - version: v18.0.0

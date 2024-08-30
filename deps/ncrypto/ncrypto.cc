@@ -1,6 +1,7 @@
 #include "ncrypto.h"
 #include <algorithm>
 #include <cstring>
+#include <openssl/dh.h>
 #include <openssl/bn.h>
 #include <openssl/evp.h>
 #include <openssl/pkcs12.h>
@@ -8,6 +9,9 @@
 #if OPENSSL_VERSION_MAJOR >= 3
 #include <openssl/provider.h>
 #endif
+#ifdef OPENSSL_IS_BORINGSSL
+#include "dh-primes.h"
+#endif  // OPENSSL_IS_BORINGSSL
 
 namespace ncrypto {
 namespace {
@@ -287,6 +291,11 @@ bool BignumPointer::isOne() const {
 
 const BIGNUM* BignumPointer::One() {
   return BN_value_one();
+}
+
+BignumPointer BignumPointer::clone() {
+  if (!bn_) return {};
+  return BignumPointer(BN_dup(bn_.get()));
 }
 
 // ============================================================================
@@ -908,6 +917,24 @@ X509View::CheckMatch X509View::checkIp(const std::string_view ip, int flags) con
   }
 }
 
+X509View X509View::From(const SSLPointer& ssl) {
+  ClearErrorOnReturn clear_error_on_return;
+  if (!ssl) return {};
+  return X509View(SSL_get_certificate(ssl.get()));
+}
+
+X509View X509View::From(const SSLCtxPointer& ctx) {
+  ClearErrorOnReturn clear_error_on_return;
+  if (!ctx) return {};
+  return X509View(SSL_CTX_get0_certificate(ctx.get()));
+}
+
+X509Pointer X509View::clone() const {
+  ClearErrorOnReturn clear_error_on_return;
+  if (!cert_) return {};
+  return X509Pointer(X509_dup(const_cast<X509*>(cert_)));
+}
+
 Result<X509Pointer, int> X509Pointer::Parse(Buffer<const unsigned char> buffer) {
   ClearErrorOnReturn clearErrorOnReturn;
   BIOPointer bio(BIO_new_mem_buf(buffer.data, buffer.len));
@@ -922,4 +949,307 @@ Result<X509Pointer, int> X509Pointer::Parse(Buffer<const unsigned char> buffer) 
 
   return Result<X509Pointer, int>(ERR_get_error());
 }
+
+
+X509Pointer X509Pointer::IssuerFrom(const SSLPointer& ssl, const X509View& view) {
+  return IssuerFrom(SSL_get_SSL_CTX(ssl.get()), view);
+}
+
+X509Pointer X509Pointer::IssuerFrom(const SSL_CTX* ctx, const X509View& cert) {
+  X509_STORE* store = SSL_CTX_get_cert_store(ctx);
+  DeleteFnPtr<X509_STORE_CTX, X509_STORE_CTX_free> store_ctx(
+      X509_STORE_CTX_new());
+  X509Pointer result;
+  X509* issuer;
+  if (store_ctx.get() != nullptr &&
+      X509_STORE_CTX_init(store_ctx.get(), store, nullptr, nullptr) == 1 &&
+      X509_STORE_CTX_get1_issuer(&issuer, store_ctx.get(), cert.get()) == 1) {
+    result.reset(issuer);
+  }
+  return result;
+}
+
+X509Pointer X509Pointer::PeerFrom(const SSLPointer& ssl) {
+  return X509Pointer(SSL_get_peer_certificate(ssl.get()));
+}
+// ============================================================================
+// BIOPointer
+
+BIOPointer::BIOPointer(BIO* bio) : bio_(bio) {}
+
+BIOPointer::BIOPointer(BIOPointer&& other) noexcept : bio_(other.release()) {}
+
+BIOPointer& BIOPointer::operator=(BIOPointer&& other) noexcept {
+  if (this == &other) return *this;
+  this->~BIOPointer();
+  return *new (this) BIOPointer(std::move(other));
+}
+
+BIOPointer::~BIOPointer() { reset(); }
+
+void BIOPointer::reset(BIO* bio) { bio_.reset(bio); }
+
+BIO* BIOPointer::release() { return bio_.release(); }
+
+bool BIOPointer::resetBio() const {
+  if (!bio_) return 0;
+  return BIO_reset(bio_.get()) == 1;
+}
+
+BIOPointer BIOPointer::NewMem() {
+  return BIOPointer(BIO_new(BIO_s_mem()));
+}
+
+BIOPointer BIOPointer::NewSecMem() {
+  return BIOPointer(BIO_new(BIO_s_secmem()));
+}
+
+BIOPointer BIOPointer::New(const BIO_METHOD* method) {
+  return BIOPointer(BIO_new(method));
+}
+
+BIOPointer BIOPointer::New(const void* data, size_t len) {
+  return BIOPointer(BIO_new_mem_buf(data, len));
+}
+
+BIOPointer BIOPointer::NewFile(std::string_view filename, std::string_view mode) {
+  return BIOPointer(BIO_new_file(filename.data(), mode.data()));
+}
+
+BIOPointer BIOPointer::NewFp(FILE* fd, int close_flag) {
+  return BIOPointer(BIO_new_fp(fd, close_flag));
+}
+
+int BIOPointer::Write(BIOPointer* bio, std::string_view message) {
+  if (bio == nullptr || !*bio) return 0;
+  return BIO_write(bio->get(), message.data(), message.size());
+}
+
+// ============================================================================
+// DHPointer
+
+namespace {
+bool EqualNoCase(const std::string_view a, const std::string_view b) {
+  if (a.size() != b.size()) return false;
+  return std::equal(a.begin(), a.end(), b.begin(), b.end(),
+      [](char a, char b) { return std::tolower(a) == std::tolower(b); });
+}
+}  // namespace
+
+DHPointer::DHPointer(DH* dh) : dh_(dh) {}
+
+DHPointer::DHPointer(DHPointer&& other) noexcept : dh_(other.release()) {}
+
+DHPointer& DHPointer::operator=(DHPointer&& other) noexcept {
+  if (this == &other) return *this;
+  this->~DHPointer();
+  return *new (this) DHPointer(std::move(other));
+}
+
+DHPointer::~DHPointer() { reset(); }
+
+void DHPointer::reset(DH* dh) { dh_.reset(dh); }
+
+DH* DHPointer::release() { return dh_.release(); }
+
+BignumPointer DHPointer::FindGroup(const std::string_view name,
+                                   FindGroupOption option) {
+#define V(n, p) if (EqualNoCase(name, n)) return BignumPointer(p(nullptr));
+  if (option != FindGroupOption::NO_SMALL_PRIMES) {
+    V("modp1", BN_get_rfc2409_prime_768);
+    V("modp2", BN_get_rfc2409_prime_1024);
+    V("modp5", BN_get_rfc3526_prime_1536);
+  }
+  V("modp14", BN_get_rfc3526_prime_2048);
+  V("modp15", BN_get_rfc3526_prime_3072);
+  V("modp16", BN_get_rfc3526_prime_4096);
+  V("modp17", BN_get_rfc3526_prime_6144);
+  V("modp18", BN_get_rfc3526_prime_8192);
+#undef V
+  return {};
+}
+
+BignumPointer DHPointer::GetStandardGenerator() {
+  auto bn = BignumPointer::New();
+  if (!bn) return {};
+  if (!bn.setWord(DH_GENERATOR_2)) return {};
+  return bn;
+}
+
+DHPointer DHPointer::FromGroup(const std::string_view name,
+                               FindGroupOption option) {
+  auto group = FindGroup(name, option);
+  if (!group) return {};  // Unable to find the named group.
+
+  auto generator = GetStandardGenerator();
+  if (!generator) return {};  // Unable to create the generator.
+
+  return New(std::move(group), std::move(generator));
+}
+
+DHPointer DHPointer::New(BignumPointer&& p, BignumPointer&& g) {
+  if (!p || !g) return {};
+
+  DHPointer dh(DH_new());
+  if (!dh) return {};
+
+  if (DH_set0_pqg(dh.get(), p.get(), nullptr, g.get()) != 1) return {};
+
+  // If the call above is successful, the DH object takes ownership of the
+  // BIGNUMs, so we must release them here.
+  p.release();
+  g.release();
+
+  return dh;
+}
+
+DHPointer DHPointer::New(size_t bits, unsigned int generator) {
+  DHPointer dh(DH_new());
+  if (!dh) return {};
+
+  if (DH_generate_parameters_ex(dh.get(), bits, generator, nullptr) != 1) {
+    return {};
+  }
+
+  return dh;
+}
+
+DHPointer::CheckResult DHPointer::check() {
+  ClearErrorOnReturn clearErrorOnReturn;
+  if (!dh_) return DHPointer::CheckResult::NONE;
+  int codes = 0;
+  if (DH_check(dh_.get(), &codes) != 1)
+    return DHPointer::CheckResult::CHECK_FAILED;
+  return static_cast<CheckResult>(codes);
+}
+
+DHPointer::CheckPublicKeyResult DHPointer::checkPublicKey(const BignumPointer& pub_key) {
+  ClearErrorOnReturn clearErrorOnReturn;
+  if (!pub_key || !dh_) return DHPointer::CheckPublicKeyResult::CHECK_FAILED;
+  int codes = 0;
+  if (DH_check_pub_key(dh_.get(), pub_key.get(), &codes) != 1)
+    return DHPointer::CheckPublicKeyResult::CHECK_FAILED;
+  if (codes & DH_CHECK_PUBKEY_TOO_SMALL) {
+    return DHPointer::CheckPublicKeyResult::TOO_SMALL;
+  } else if (codes & DH_CHECK_PUBKEY_TOO_SMALL) {
+    return DHPointer::CheckPublicKeyResult::TOO_LARGE;
+  } else if (codes != 0) {
+    return DHPointer::CheckPublicKeyResult::INVALID;
+  }
+  return CheckPublicKeyResult::NONE;
+}
+
+DataPointer DHPointer::getPrime() const {
+  if (!dh_) return {};
+  const BIGNUM* p;
+  DH_get0_pqg(dh_.get(), &p, nullptr, nullptr);
+  return BignumPointer::Encode(p);
+}
+
+DataPointer DHPointer::getGenerator() const {
+  if (!dh_) return {};
+  const BIGNUM* g;
+  DH_get0_pqg(dh_.get(), nullptr, nullptr, &g);
+  return BignumPointer::Encode(g);
+}
+
+DataPointer DHPointer::getPublicKey() const {
+  if (!dh_) return {};
+  const BIGNUM* pub_key;
+  DH_get0_key(dh_.get(), &pub_key, nullptr);
+  return BignumPointer::Encode(pub_key);
+}
+
+DataPointer DHPointer::getPrivateKey() const {
+  if (!dh_) return {};
+  const BIGNUM* pvt_key;
+  DH_get0_key(dh_.get(), nullptr, &pvt_key);
+  return BignumPointer::Encode(pvt_key);
+}
+
+DataPointer DHPointer::generateKeys() const {
+  ClearErrorOnReturn clearErrorOnReturn;
+  if (!dh_) return {};
+
+  // Key generation failed
+  if (!DH_generate_key(dh_.get())) return {};
+
+  return getPublicKey();
+}
+
+size_t DHPointer::size() const {
+  if (!dh_) return 0;
+  return DH_size(dh_.get());
+}
+
+DataPointer DHPointer::computeSecret(const BignumPointer& peer) const {
+  ClearErrorOnReturn clearErrorOnReturn;
+  if (!dh_ || !peer) return {};
+
+  auto dp = DataPointer::Alloc(size());
+  if (!dp) return {};
+
+  int size = DH_compute_key(static_cast<uint8_t*>(dp.get()), peer.get(), dh_.get());
+  if (size < 0) return {};
+
+  // The size of the computed key can be smaller than the size of the DH key.
+  // We want to make sure that the key is correctly padded.
+  if (size < dp.size()) {
+    const size_t padding = dp.size() - size;
+    uint8_t* data = static_cast<uint8_t*>(dp.get());
+    memmove(data + padding, data, size);
+    memset(data, 0, padding);
+  }
+
+  return dp;
+}
+
+bool DHPointer::setPublicKey(BignumPointer&& key) {
+  if (!dh_) return false;
+  if (DH_set0_key(dh_.get(), key.get(), nullptr) == 1) {
+    key.release();
+    return true;
+  }
+  return false;
+}
+
+bool DHPointer::setPrivateKey(BignumPointer&& key) {
+  if (!dh_) return false;
+  if (DH_set0_key(dh_.get(), nullptr, key.get()) == 1) {
+    key.release();
+    return true;
+  }
+  return false;
+}
+
+DataPointer DHPointer::stateless(const EVPKeyPointer& ourKey,
+                                 const EVPKeyPointer& theirKey) {
+  size_t out_size;
+  if (!ourKey || !theirKey) return {};
+
+  EVPKeyCtxPointer ctx(EVP_PKEY_CTX_new(ourKey.get(), nullptr));
+  if (!ctx ||
+      EVP_PKEY_derive_init(ctx.get()) <= 0 ||
+      EVP_PKEY_derive_set_peer(ctx.get(), theirKey.get()) <= 0 ||
+      EVP_PKEY_derive(ctx.get(), nullptr, &out_size) <= 0) {
+    return {};
+  }
+
+  if (out_size == 0) return {};
+
+  auto out = DataPointer::Alloc(out_size);
+  if (EVP_PKEY_derive(ctx.get(), reinterpret_cast<uint8_t*>(out.get()), &out_size) <= 0) {
+    return {};
+  }
+
+  if (out_size < out.size()) {
+    const size_t padding = out.size() - out_size;
+    uint8_t* data = static_cast<uint8_t*>(out.get());
+    memmove(data + padding, data, out_size);
+    memset(data, 0, padding);
+  }
+
+  return out;
+}
+
 }  // namespace ncrypto

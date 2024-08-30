@@ -6,8 +6,8 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <openssl/bio.h>
 #include <openssl/bn.h>
-#include <openssl/x509.h>
 #include <openssl/dh.h>
 #include <openssl/dsa.h>
 #include <openssl/ec.h>
@@ -17,6 +17,7 @@
 #include <openssl/kdf.h>
 #include <openssl/rsa.h>
 #include <openssl/ssl.h>
+#include <openssl/x509.h>
 #ifndef OPENSSL_NO_ENGINE
 #  include <openssl/engine.h>
 #endif  // !OPENSSL_NO_ENGINE
@@ -192,9 +193,7 @@ template <typename T, void (*function)(T*)>
 using DeleteFnPtr = typename FunctionDeleter<T, function>::Pointer;
 
 using BignumCtxPointer = DeleteFnPtr<BN_CTX, BN_CTX_free>;
-using BIOPointer = DeleteFnPtr<BIO, BIO_free_all>;
 using CipherCtxPointer = DeleteFnPtr<EVP_CIPHER_CTX, EVP_CIPHER_CTX_free>;
-using DHPointer = DeleteFnPtr<DH, DH_free>;
 using DSAPointer = DeleteFnPtr<DSA, DSA_free>;
 using DSASigPointer = DeleteFnPtr<DSA_SIG, DSA_SIG_free>;
 using ECDSASigPointer = DeleteFnPtr<ECDSA_SIG, ECDSA_SIG_free>;
@@ -265,6 +264,53 @@ class DataPointer final {
   size_t len_ = 0;
 };
 
+class BIOPointer final {
+public:
+  static BIOPointer NewMem();
+  static BIOPointer NewSecMem();
+  static BIOPointer New(const BIO_METHOD* method);
+  static BIOPointer New(const void* data, size_t len);
+  static BIOPointer NewFile(std::string_view filename, std::string_view mode);
+  static BIOPointer NewFp(FILE* fd, int flags);
+
+  BIOPointer() = default;
+  BIOPointer(std::nullptr_t) : bio_(nullptr) {}
+  explicit BIOPointer(BIO* bio);
+  BIOPointer(BIOPointer&& other) noexcept;
+  BIOPointer& operator=(BIOPointer&& other) noexcept;
+  NCRYPTO_DISALLOW_COPY(BIOPointer)
+  ~BIOPointer();
+
+  inline bool operator==(std::nullptr_t) noexcept { return bio_ == nullptr; }
+  inline operator bool() const { return bio_ != nullptr; }
+  inline BIO* get() const noexcept { return bio_.get(); }
+
+  inline operator BUF_MEM*() const {
+    BUF_MEM* mem = nullptr;
+    if (!bio_) return mem;
+    BIO_get_mem_ptr(bio_.get(), &mem);
+    return mem;
+  }
+
+  inline operator BIO*() const { return bio_.get(); }
+
+  void reset(BIO* bio = nullptr);
+  BIO* release();
+
+  bool resetBio() const;
+
+  static int Write(BIOPointer* bio, std::string_view message);
+
+  template <typename...Args>
+  static void Printf(BIOPointer* bio, const char* format, Args...args) {
+    if (bio == nullptr || !*bio) return;
+    BIO_printf(bio->get(), format, std::forward<Args...>(args...));
+  }
+
+private:
+  mutable DeleteFnPtr<BIO, BIO_free_all> bio_;
+};
+
 class BignumPointer final {
  public:
   BignumPointer() = default;
@@ -307,17 +353,102 @@ class BignumPointer final {
   static unsigned long GetWord(const BIGNUM* bn);
   static const BIGNUM* One();
 
+  BignumPointer clone();
+
  private:
   DeleteFnPtr<BIGNUM, BN_clear_free> bn_;
 };
 
+class DHPointer final {
+public:
+
+  enum class FindGroupOption {
+    NONE,
+    // There are known and documented security issues with prime groups smaller
+    // than 2048 bits. When the NO_SMALL_PRIMES option is set, these small prime
+    // groups will not be supported.
+    NO_SMALL_PRIMES,
+  };
+
+  static BignumPointer GetStandardGenerator();
+
+  static BignumPointer FindGroup(const std::string_view name,
+                                 FindGroupOption option = FindGroupOption::NONE);
+  static DHPointer FromGroup(const std::string_view name,
+                             FindGroupOption option = FindGroupOption::NONE);
+
+  static DHPointer New(BignumPointer&& p, BignumPointer&& g);
+  static DHPointer New(size_t bits, unsigned int generator);
+
+  DHPointer() = default;
+  explicit DHPointer(DH* dh);
+  DHPointer(DHPointer&& other) noexcept;
+  DHPointer& operator=(DHPointer&& other) noexcept;
+  NCRYPTO_DISALLOW_COPY(DHPointer)
+  ~DHPointer();
+
+  inline bool operator==(std::nullptr_t) noexcept { return dh_ == nullptr; }
+  inline operator bool() const { return dh_ != nullptr; }
+  inline DH* get() const { return dh_.get(); }
+  void reset(DH* dh = nullptr);
+  DH* release();
+
+  enum class CheckResult {
+    NONE,
+    P_NOT_PRIME = DH_CHECK_P_NOT_PRIME,
+    P_NOT_SAFE_PRIME = DH_CHECK_P_NOT_SAFE_PRIME,
+    UNABLE_TO_CHECK_GENERATOR = DH_UNABLE_TO_CHECK_GENERATOR,
+    NOT_SUITABLE_GENERATOR = DH_NOT_SUITABLE_GENERATOR,
+    Q_NOT_PRIME = DH_CHECK_Q_NOT_PRIME,
+    INVALID_Q = DH_CHECK_INVALID_Q_VALUE,
+    INVALID_J = DH_CHECK_INVALID_J_VALUE,
+    CHECK_FAILED = 512,
+  };
+  CheckResult check();
+
+  enum class CheckPublicKeyResult {
+    NONE,
+    TOO_SMALL = DH_R_CHECK_PUBKEY_TOO_SMALL,
+    TOO_LARGE = DH_R_CHECK_PUBKEY_TOO_LARGE,
+    INVALID = DH_R_CHECK_PUBKEY_INVALID,
+    CHECK_FAILED = 512,
+  };
+  // Check to see if the given public key is suitable for this DH instance.
+  CheckPublicKeyResult checkPublicKey(const BignumPointer& pub_key);
+
+  DataPointer getPrime() const;
+  DataPointer getGenerator() const;
+  DataPointer getPublicKey() const;
+  DataPointer getPrivateKey() const;
+  DataPointer generateKeys() const;
+  DataPointer computeSecret(const BignumPointer& peer) const;
+
+  bool setPublicKey(BignumPointer&& key);
+  bool setPrivateKey(BignumPointer&& key);
+
+  size_t size() const;
+
+  static DataPointer stateless(const EVPKeyPointer& ourKey,
+                               const EVPKeyPointer& theirKey);
+
+private:
+  DeleteFnPtr<DH, DH_free> dh_;
+};
+
+class X509Pointer;
+
 class X509View final {
  public:
+  static X509View From(const SSLPointer& ssl);
+  static X509View From(const SSLCtxPointer& ctx);
+
   X509View() = default;
   inline explicit X509View(const X509* cert) : cert_(cert) {}
   X509View(const X509View& other) = default;
   X509View& operator=(const X509View& other) = default;
   NCRYPTO_DISALLOW_MOVE(X509View)
+
+  inline X509* get() const { return const_cast<X509*>(cert_); }
 
   inline bool operator==(std::nullptr_t) noexcept { return cert_ == nullptr; }
   inline operator bool() const { return cert_ != nullptr; }
@@ -340,6 +471,8 @@ class X509View final {
   bool checkPrivateKey(const EVPKeyPointer& pkey) const;
   bool checkPublicKey(const EVPKeyPointer& pkey) const;
 
+  X509Pointer clone() const;
+
   enum class CheckMatch {
     NO_MATCH,
     MATCH,
@@ -358,6 +491,9 @@ class X509View final {
 class X509Pointer final {
  public:
   static Result<X509Pointer, int> Parse(Buffer<const unsigned char> buffer);
+  static X509Pointer IssuerFrom(const SSLPointer& ssl, const X509View& view);
+  static X509Pointer IssuerFrom(const SSL_CTX* ctx, const X509View& view);
+  static X509Pointer PeerFrom(const SSLPointer& ssl);
 
   X509Pointer() = default;
   explicit X509Pointer(X509* cert);
