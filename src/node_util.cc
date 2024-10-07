@@ -23,6 +23,7 @@ using v8::Isolate;
 using v8::KeyCollectionMode;
 using v8::Local;
 using v8::LocalVector;
+using v8::Name;
 using v8::Object;
 using v8::ObjectTemplate;
 using v8::ONLY_CONFIGURABLE;
@@ -162,15 +163,6 @@ static void GetCallerLocation(const FunctionCallbackInfo<Value>& args) {
   args.GetReturnValue().Set(Array::New(args.GetIsolate(), ret, arraysize(ret)));
 }
 
-static void IsArrayBufferDetached(const FunctionCallbackInfo<Value>& args) {
-  if (args[0]->IsArrayBuffer()) {
-    auto buffer = args[0].As<v8::ArrayBuffer>();
-    args.GetReturnValue().Set(buffer->WasDetached());
-    return;
-  }
-  args.GetReturnValue().Set(false);
-}
-
 static void PreviewEntries(const FunctionCallbackInfo<Value>& args) {
   if (!args[0]->IsObject())
     return;
@@ -271,28 +263,32 @@ static void GetCallSite(const FunctionCallbackInfo<Value>& args) {
 
   // Frame 0 is node:util. It should be skipped.
   for (int i = 1; i < frame_count; ++i) {
-    Local<Object> obj = Object::New(isolate);
     Local<StackFrame> stack_frame = stack->GetFrame(isolate, i);
 
-    Utf8Value function_name(isolate, stack_frame->GetFunctionName());
-    Utf8Value script_name(isolate, stack_frame->GetScriptName());
+    Local<Value> function_name = stack_frame->GetFunctionName();
+    if (function_name.IsEmpty()) {
+      function_name = v8::String::Empty(isolate);
+    }
 
-    obj->Set(env->context(),
-             env->function_name_string(),
-             String::NewFromUtf8(isolate, *function_name).ToLocalChecked())
-        .Check();
-    obj->Set(env->context(),
-             env->script_name_string(),
-             String::NewFromUtf8(isolate, *script_name).ToLocalChecked())
-        .Check();
-    obj->Set(env->context(),
-             env->line_number_string(),
-             Integer::NewFromUnsigned(isolate, stack_frame->GetLineNumber()))
-        .Check();
-    obj->Set(env->context(),
-             env->column_string(),
-             Integer::NewFromUnsigned(isolate, stack_frame->GetColumn()))
-        .Check();
+    Local<Value> script_name = stack_frame->GetScriptName();
+    if (script_name.IsEmpty()) {
+      script_name = v8::String::Empty(isolate);
+    }
+
+    Local<Name> names[] = {
+        env->function_name_string(),
+        env->script_name_string(),
+        env->line_number_string(),
+        env->column_string(),
+    };
+    Local<Value> values[] = {
+        function_name,
+        script_name,
+        Integer::NewFromUnsigned(isolate, stack_frame->GetLineNumber()),
+        Integer::NewFromUnsigned(isolate, stack_frame->GetColumn()),
+    };
+    Local<Object> obj = Object::New(
+        isolate, v8::Null(isolate), names, values, arraysize(names));
 
     callsite_objects.push_back(obj);
   }
@@ -306,7 +302,6 @@ void RegisterExternalReferences(ExternalReferenceRegistry* registry) {
   registry->Register(GetPromiseDetails);
   registry->Register(GetProxyDetails);
   registry->Register(GetCallerLocation);
-  registry->Register(IsArrayBufferDetached);
   registry->Register(PreviewEntries);
   registry->Register(GetCallSite);
   registry->Register(GetOwnNonIndexProperties);
@@ -406,8 +401,6 @@ void Initialize(Local<Object> target,
   SetMethodNoSideEffect(context, target, "getProxyDetails", GetProxyDetails);
   SetMethodNoSideEffect(
       context, target, "getCallerLocation", GetCallerLocation);
-  SetMethodNoSideEffect(
-      context, target, "isArrayBufferDetached", IsArrayBufferDetached);
   SetMethodNoSideEffect(context, target, "previewEntries", PreviewEntries);
   SetMethodNoSideEffect(
       context, target, "getOwnNonIndexProperties", GetOwnNonIndexProperties);

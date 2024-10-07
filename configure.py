@@ -1671,7 +1671,7 @@ def configure_v8(o, configs):
     o['variables']['v8_enable_short_builtin_calls'] = 1
   if options.v8_enable_snapshot_compression:
     o['variables']['v8_enable_snapshot_compression'] = 1
-  if options.v8_enable_object_print and options.v8_disable_object_print:
+  if all(opt in sys.argv for opt in ['--v8-enable-object-print', '--v8-disable-object-print']):
     raise Exception(
         'Only one of the --v8-enable-object-print or --v8-disable-object-print options '
         'can be specified at a time.')
@@ -2310,8 +2310,9 @@ else:
 
 if options.compile_commands_json:
   gyp_args += ['-f', 'compile_commands_json']
-  os.path.islink('./compile_commands.json') and os.unlink('./compile_commands.json')
-  os.symlink('./out/' + config['BUILDTYPE'] + '/compile_commands.json', './compile_commands.json')
+  if sys.platform != 'win32':
+    os.path.lexists('./compile_commands.json') and os.unlink('./compile_commands.json')
+    os.symlink('./out/' + config['BUILDTYPE'] + '/compile_commands.json', './compile_commands.json')
 
 # pass the leftover non-whitespace positional arguments to GYP
 gyp_args += [arg for arg in args if not str.isspace(arg)]
@@ -2321,4 +2322,7 @@ if warn.warned and not options.verbose:
 
 print_verbose("running: \n    " + " ".join(['python', 'tools/gyp_node.py'] + gyp_args))
 run_gyp(gyp_args)
+if options.compile_commands_json and sys.platform == 'win32':
+  os.path.isfile('./compile_commands.json') and os.unlink('./compile_commands.json')
+  shutil.copy2('./out/' + config['BUILDTYPE'] + '/compile_commands.json', './compile_commands.json')
 info('configure completed successfully')
